@@ -10,6 +10,7 @@ class RemoteDisplayNSView: NSView {
     private var buttonMask: Int = 0
     private var displayImage: CGImage?
     private var trackingArea: NSTrackingArea?
+    private var remoteCursor: NSCursor?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -43,6 +44,17 @@ class RemoteDisplayNSView: NSView {
     func updateDisplayImage(_ image: CGImage?) {
         displayImage = image
         needsDisplay = true
+    }
+
+    func updateCursor(_ cursor: NSCursor) {
+        remoteCursor = cursor
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func resetCursorRects() {
+        if let cursor = remoteCursor {
+            addCursorRect(bounds, cursor: cursor)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -166,47 +178,85 @@ class RemoteDisplayNSView: NSView {
 
     // MARK: - Keyboard events
 
-    override func keyDown(with event: NSEvent) {
+    // Track which modifier keysyms are currently pressed
+    private var activeModifiers: Set<Int> = []
+
+    /// Translate Cmd+key to Ctrl+key for the remote Windows side
+    private var commandIsCtrl: Bool { true }
+
+    private func sendKey(event: NSEvent, pressed: Bool) {
+        // Handle non-character keys (arrows, function keys, delete, return, etc.)
         if KeySymMapping.isNonCharacterKey(event.keyCode) {
             if let keysym = KeySymMapping.keysym(forKeyCode: event.keyCode) {
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: true))
+                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: pressed))
             }
-        } else if let chars = event.characters {
+            return
+        }
+
+        // For character keys, use charactersIgnoringModifiers to get the base key
+        // This ensures Shift+Enter, Cmd+C etc. resolve correctly
+        let chars: String?
+        if event.modifierFlags.contains(.command) {
+            // When Cmd is held, characters may be empty — use the unmodified key
+            chars = event.charactersIgnoringModifiers
+        } else {
+            chars = event.characters ?? event.charactersIgnoringModifiers
+        }
+
+        if let chars {
             for char in chars {
                 if let keysym = KeySymMapping.keysym(for: char) {
-                    tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: true))
+                    tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: pressed))
                 }
             }
         }
     }
 
-    override func keyUp(with event: NSEvent) {
-        if KeySymMapping.isNonCharacterKey(event.keyCode) {
-            if let keysym = KeySymMapping.keysym(forKeyCode: event.keyCode) {
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: false))
+    // Intercept Cmd+key shortcuts before macOS Edit menu consumes them (e.g. Cmd+V paste)
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) {
+            sendKey(event: event, pressed: true)
+            // Schedule key-up since we won't get a normal keyUp for key equivalents
+            DispatchQueue.main.async { [weak self] in
+                self?.sendKey(event: event, pressed: false)
             }
-        } else if let chars = event.characters {
-            for char in chars {
-                if let keysym = KeySymMapping.keysym(for: char) {
-                    tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: false))
-                }
-            }
+            return true // We handled it — don't let the system menu take it
         }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.isARepeat {
+            // Send release+press so the remote side sees each repeat as a distinct keystroke
+            sendKey(event: event, pressed: false)
+        }
+        sendKey(event: event, pressed: true)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        sendKey(event: event, pressed: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
         // Handle modifier key changes
-        let modifiers: [(NSEvent.ModifierFlags, UInt16, UInt16)] = [
-            (.shift, UInt16(kVK_Shift), UInt16(kVK_RightShift)),
-            (.control, UInt16(kVK_Control), UInt16(kVK_RightControl)),
-            (.option, UInt16(kVK_Option), UInt16(kVK_RightOption)),
-            (.command, UInt16(kVK_Command), UInt16(kVK_RightCommand)),
+        // Map Cmd -> Ctrl on the remote side so Cmd+C/V/X/A work as expected on Windows
+        let modifiers: [(NSEvent.ModifierFlags, Int)] = [
+            (.shift,   0xFFE1), // Shift_L
+            (.control, 0xFFE3), // Control_L
+            (.option,  0xFFE9), // Alt_L
+            (.command, commandIsCtrl ? 0xFFE3 : 0xFFEB), // Cmd -> Ctrl_L (or Super_L)
         ]
 
-        for (flag, leftCode, _) in modifiers {
-            if let keysym = KeySymMapping.keysym(forKeyCode: leftCode) {
-                let pressed = event.modifierFlags.contains(flag)
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: pressed))
+        for (flag, keysym) in modifiers {
+            let pressed = event.modifierFlags.contains(flag)
+            let wasActive = activeModifiers.contains(keysym)
+
+            if pressed && !wasActive {
+                activeModifiers.insert(keysym)
+                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: true))
+            } else if !pressed && wasActive {
+                activeModifiers.remove(keysym)
+                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: false))
             }
         }
     }

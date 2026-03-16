@@ -1,5 +1,13 @@
 import Foundation
 
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        return nil  // Don't follow redirects
+    }
+}
+
 struct AuthToken: Sendable {
     let token: String
     let dataSource: String
@@ -24,15 +32,34 @@ enum AuthState: Sendable {
 
 actor GuacamoleAPI {
     let baseURL: String
+    private let session: URLSession
 
     init(baseURL: String) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        self.session = URLSession(configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
+    }
+
+    /// Build a request with headers that prevent HTML redirects
+    private func apiRequest(url: URL, method: String = "GET") -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+
+    /// Check if response is HTML instead of JSON (server redirect / proxy issue)
+    private func isHTMLResponse(_ data: Data, _ response: HTTPURLResponse) -> Bool {
+        let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? ""
+        if contentType.contains("text/html") { return true }
+        if let body = String(data: data, encoding: .utf8),
+           body.trimmingCharacters(in: .whitespaces).hasPrefix("<!") || body.trimmingCharacters(in: .whitespaces).hasPrefix("<html") {
+            return true
+        }
+        return false
     }
 
     func authenticate(username: String, password: String, totpCode: String? = nil) async throws -> AuthState {
-        let url = URL(string: "\(baseURL)/api/tokens")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        var request = apiRequest(url: URL(string: "\(baseURL)/api/tokens")!, method: "POST")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         var bodyComponents = URLComponents()
@@ -46,11 +73,14 @@ actor GuacamoleAPI {
         bodyComponents.queryItems = queryItems
         request.httpBody = bodyComponents.query?.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         let httpResponse = response as! HTTPURLResponse
 
+        if isHTMLResponse(data, httpResponse) {
+            return .failed("Server returned a login page instead of the API. Check your server URL — it should point to the Guacamole base path (e.g. https://host/guacamole)")
+        }
+
         if httpResponse.statusCode == 403 {
-            // Check if TOTP is required
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let expected = json["expected"] as? [[String: Any]] {
                 let needsTotp = expected.contains { field in
@@ -72,7 +102,7 @@ actor GuacamoleAPI {
               let token = json["authToken"] as? String,
               let dataSource = json["dataSource"] as? String,
               let availableSources = json["availableDataSources"] as? [String] else {
-            return .failed("Unexpected response format")
+            return .failed("Unexpected response format from server")
         }
 
         return .authenticated(AuthToken(
@@ -85,7 +115,6 @@ actor GuacamoleAPI {
     func listConnections(token: AuthToken) async throws -> [GuacConnection] {
         var allConnections: [GuacConnection] = []
 
-        // Try all available data sources
         for dataSource in token.availableDataSources {
             let connections = try await fetchConnections(token: token.token, dataSource: dataSource)
             allConnections.append(contentsOf: connections)
@@ -95,17 +124,14 @@ actor GuacamoleAPI {
     }
 
     private func fetchConnections(token: String, dataSource: String) async throws -> [GuacConnection] {
-        // Use the flat connections endpoint: /api/session/data/{dataSource}/connections
         let url = URL(string: "\(baseURL)/api/session/data/\(dataSource)/connections?token=\(token)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        let request = apiRequest(url: url)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         let httpResponse = response as! HTTPURLResponse
 
-        guard httpResponse.statusCode == 200 else { return [] }
+        guard httpResponse.statusCode == 200, !isHTMLResponse(data, httpResponse) else { return [] }
 
-        // Response is a dict keyed by connection identifier
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
         }

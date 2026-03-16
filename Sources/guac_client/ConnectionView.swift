@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ConnectionView: View {
     let session: ConnectionSession
+    let connectionID: String
     let defaultUsername: String
     let onDisconnect: () -> Void
 
@@ -9,23 +10,11 @@ struct ConnectionView: View {
     @State private var credentialFields: [String] = []
     @State private var credentialValues: [String: String] = [:]
 
+    /// UserDefaults key for saved remote credentials per connection
+    private var credentialsSaveKey: String { "rdpCreds_\(connectionID)" }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button("Disconnect") {
-                    session.stop()
-                    onDisconnect()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-                .padding(.vertical, 4)
-                Spacer()
-            }
-            .background(.bar)
-
-            Divider()
-
             ZStack {
                 RemoteDisplayView(nsView: session.nsView)
 
@@ -35,6 +24,7 @@ struct ConnectionView: View {
                         fields: credentialFields,
                         values: $credentialValues
                     ) {
+                        UserDefaults.standard.set(credentialValues, forKey: credentialsSaveKey)
                         session.sendCredentials(credentialValues)
                         showCredentials = false
                     }
@@ -44,16 +34,22 @@ struct ConnectionView: View {
         .onAppear {
             session.onCredentialsRequired = { fields in
                 credentialFields = fields
+                // Load saved credentials for this connection
+                let saved = UserDefaults.standard.dictionary(forKey: credentialsSaveKey) as? [String: String] ?? [:]
                 for field in fields {
-                    if credentialValues[field] == nil {
-                        if field == "username" {
-                            credentialValues[field] = defaultUsername
-                        } else {
-                            credentialValues[field] = ""
-                        }
+                    if let savedValue = saved[field], !savedValue.isEmpty {
+                        credentialValues[field] = savedValue
+                    } else if credentialValues[field] == nil {
+                        credentialValues[field] = field == "username" ? defaultUsername : ""
                     }
                 }
-                showCredentials = true
+                // Auto-submit if we have all fields filled from saved values
+                if fields.allSatisfy({ !(credentialValues[$0] ?? "").isEmpty }) {
+                    session.sendCredentials(credentialValues)
+                    UserDefaults.standard.set(credentialValues, forKey: credentialsSaveKey)
+                } else {
+                    showCredentials = true
+                }
             }
         }
     }

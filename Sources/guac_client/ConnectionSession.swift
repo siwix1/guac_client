@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor
 final class ConnectionSession: GuacamoleTunnelDelegate {
+    let connectionID: String
     let tunnel: GuacamoleTunnel
     let display: GuacamoleDisplay
     let nsView: RemoteDisplayNSView
@@ -14,6 +15,7 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
 
     init(baseURL: String, token: AuthToken, connection: GuacConnection,
          width: Int, height: Int) {
+        self.connectionID = connection.id
         self.tunnel = GuacamoleTunnel(
             baseURL: baseURL,
             token: token.token,
@@ -36,6 +38,10 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
             guard let self else { return }
             let image = self.display.getDisplayImage()
             self.nsView.updateDisplayImage(image)
+        }
+
+        display.onCursorUpdate = { [weak self] cursor in
+            self?.nsView.updateCursor(cursor)
         }
 
         tunnel.connect()

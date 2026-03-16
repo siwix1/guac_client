@@ -16,13 +16,9 @@ struct GuacApp: App {
     var body: some Scene {
         Window("Guacamole", id: "main") {
             Group {
-                if let session = appState.activeSession {
-                    ConnectionView(
-                        session: session,
-                        defaultUsername: appState.username
-                    ) {
-                        appState.disconnectSession()
-                    }
+                if appState.isLoading {
+                    ProgressView("Restoring session...")
+                        .frame(width: 380, height: 440)
                 } else {
                     switch appState.authState {
                     case .needsCredentials, .needsTOTP, .failed:
@@ -32,7 +28,10 @@ struct GuacApp: App {
                     }
                 }
             }
-            .frame(minWidth: 800, minHeight: 600)
+            .frame(minWidth: 400, minHeight: 300)
+            .task {
+                await appState.tryRestoreSession()
+            }
         }
         .windowResizability(.contentMinSize)
     }

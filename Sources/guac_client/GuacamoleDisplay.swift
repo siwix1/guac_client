@@ -22,6 +22,8 @@ final class GuacamoleDisplay {
 
     // Callback when display updates
     var onDisplayUpdate: (() -> Void)?
+    // Callback when cursor changes
+    var onCursorUpdate: ((NSCursor) -> Void)?
 
     private struct LayerProperties {
         var parentIndex: Int = 0
@@ -309,8 +311,11 @@ final class GuacamoleDisplay {
         let rawSrcY = srcImage.height - srcY - srcH
         let srcRect = CGRect(x: srcX, y: rawSrcY, width: srcW, height: srcH)
         if let cropped = srcImage.cropping(to: srcRect) {
-            cursorImage = NSImage(cgImage: cropped, size: NSSize(width: srcW, height: srcH))
+            let image = NSImage(cgImage: cropped, size: NSSize(width: srcW, height: srcH))
+            cursorImage = image
             cursorHotspot = CGPoint(x: hotX, y: hotY)
+            let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotX, y: hotY))
+            onCursorUpdate?(cursor)
         }
     }
 

@@ -5,7 +5,7 @@ struct LoginView: View {
 
     @State private var serverURL = UserDefaults.standard.string(forKey: "savedServerURL") ?? ""
     @State private var username = UserDefaults.standard.string(forKey: "savedUsername") ?? ""
-    @State private var password = ""
+    @State private var password = UserDefaults.standard.string(forKey: "savedPassword") ?? ""
     @State private var totpCode = ""
     @FocusState private var focusedField: Field?
 
@@ -110,8 +110,9 @@ struct LoginView: View {
         guard isFormValid else { return }
         Task {
             UserDefaults.standard.set(serverURL, forKey: "savedServerURL")
+            UserDefaults.standard.set(username, forKey: "savedUsername")
+            UserDefaults.standard.set(password, forKey: "savedPassword")
             if case .needsTOTP(let user, let pass) = appState.authState {
-                UserDefaults.standard.set(user, forKey: "savedUsername")
                 await appState.login(serverURL: serverURL, username: user, password: pass, totpCode: totpCode)
             } else {
                 await appState.login(serverURL: serverURL, username: username, password: password)

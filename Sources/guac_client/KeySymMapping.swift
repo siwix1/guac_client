@@ -86,7 +86,9 @@ enum KeySymMapping {
              kVK_UpArrow, kVK_DownArrow,
              kVK_Home, kVK_End,
              kVK_PageUp, kVK_PageDown,
-             kVK_ForwardDelete, kVK_Escape:
+             kVK_ForwardDelete, kVK_Escape,
+             kVK_Return, kVK_Tab, kVK_Delete,
+             kVK_VolumeUp, kVK_VolumeDown, kVK_Mute:
             return true
         default:
             return false

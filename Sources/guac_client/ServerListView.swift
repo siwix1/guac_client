@@ -75,16 +75,30 @@ struct ServerListView: View {
                 )
             } else {
                 List(filteredConnections) { connection in
-                    Button {
-                        RecentConnections.markUsed(connection.id)
-                        appState.connect(to: connection)
-                    } label: {
-                        ConnectionRow(
-                            connection: connection,
-                            isRecent: recentIDs.contains(connection.id)
-                        )
+                    HStack {
+                        Button {
+                            RecentConnections.markUsed(connection.id)
+                            appState.connect(to: connection)
+                        } label: {
+                            ConnectionRow(
+                                connection: connection,
+                                isRecent: recentIDs.contains(connection.id),
+                                isActive: appState.activeSessions[connection.id] != nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        if appState.activeSessions[connection.id] != nil {
+                            Button {
+                                appState.closeSession(connectionID: connection.id)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Disconnect")
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
                 .listStyle(.inset)
             }
@@ -106,19 +120,27 @@ struct ServerListView: View {
 struct ConnectionRow: View {
     let connection: GuacConnection
     var isRecent: Bool = false
+    var isActive: Bool = false
 
     var body: some View {
         HStack {
             Image(systemName: protocolIcon)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isActive ? .green : .secondary)
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(connection.name)
                     .fontWeight(.medium)
-                Text(connection.connectionProtocol.uppercased())
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(connection.connectionProtocol.uppercased())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if isActive {
+                        Text("Connected")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
             }
 
             Spacer()
