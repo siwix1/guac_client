@@ -5,10 +5,16 @@ A native macOS client for [Apache Guacamole](https://guacamole.apache.org/), rep
 ## Features
 
 - Login with username/password and TOTP two-factor authentication
+- Session persistence — saved auth token skips 2FA on restart if still valid
 - Browse and search available remote connections
 - Recently used connections appear at the top of the list
+- Multiple simultaneous connections, each in its own native macOS window
 - Full remote desktop rendering with mouse and keyboard input
-- Server URL and username remembered across launches
+- Remote cursor rendering — shows server-provided cursors (resize, text beam, etc.)
+- macOS Cmd key mapped to Ctrl for Windows shortcuts (Cmd+C/V/X/A work as expected)
+- Key repeat support (hold to delete, hold to type, etc.)
+- Credentials remembered across launches (server URL, login, and per-connection RDP credentials)
+- Resilient networking — detects HTML redirects from proxies/SSO gateways
 - Works with any Guacamole server (RDP, VNC, SSH connections)
 
 ## Requirements
@@ -50,9 +56,7 @@ The app connects to a Guacamole server via its REST API for authentication and c
 - [ ] Clipboard sync (copy/paste between local and remote)
 - [ ] Dynamic resolution on window resize
 - [ ] Auto-reconnect on connection drop
-- [ ] Multiple sessions / tabs
 - [ ] Fullscreen mode
-- [ ] Custom cursor rendering (use server-provided cursor images)
 - [ ] Dirty-rect rendering for better performance
 - [ ] GPU-accelerated rendering (Metal/IOSurface)
 - [ ] Audio playback support
