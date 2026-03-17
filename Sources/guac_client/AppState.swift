@@ -115,13 +115,13 @@ final class AppState {
             return
         }
 
-        // Use the actual screen resolution for sharp rendering on Retina displays
+        // Use logical (point) resolution so the remote desktop renders at a
+        // comfortable size — the Retina backing scale is handled locally.
         let screen = NSScreen.main ?? NSScreen.screens.first
-        let scaleFactor = screen?.backingScaleFactor ?? 2.0
         let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        let pixelWidth = Int(screenFrame.width * scaleFactor)
-        let pixelHeight = Int(screenFrame.height * scaleFactor)
-        let dpi = Int(96.0 * scaleFactor)
+        let pixelWidth = Int(screenFrame.width)
+        let pixelHeight = Int(screenFrame.height)
+        let dpi = 96
 
         let session = ConnectionSession(
             baseURL: baseURL,

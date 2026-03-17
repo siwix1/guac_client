@@ -19,6 +19,10 @@ class RemoteDisplayNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        // Ensure Retina-sharp rendering by matching the backing scale
+        if let scaleFactor = window?.backingScaleFactor {
+            layer?.contentsScale = scaleFactor
+        }
         updateTrackingArea()
     }
 
@@ -89,7 +93,8 @@ class RemoteDisplayNSView: NSView {
             y: (bounds.height - scaledSize.height) / 2
         )
 
-        ctx.interpolationQuality = .high
+        // Use no interpolation at 1:1 for pixel-perfect sharpness, high quality when scaling
+        ctx.interpolationQuality = abs(scale - 1.0) < 0.01 ? .none : .high
         // Flip the image vertically around its center
         ctx.saveGState()
         let centerY = origin.y + scaledSize.height / 2

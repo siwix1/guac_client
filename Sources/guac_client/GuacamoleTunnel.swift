@@ -30,7 +30,6 @@ final class GuacamoleTunnel: @unchecked Sendable {
             "GUAC_HEIGHT=\(height)",
             "GUAC_DPI=\(dpi)",
             "GUAC_IMAGE=image/png",
-            "GUAC_IMAGE=image/jpeg",
             "GUAC_IMAGE=image/webp",
             "GUAC_AUDIO=audio/L16",
             "GUAC_TIMEZONE=\(TimeZone.current.identifier)",
