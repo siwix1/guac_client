@@ -302,21 +302,32 @@ final class GuacamoleDisplay {
               let srcX = Int(args[3]),
               let srcY = Int(args[4]),
               let srcW = Int(args[5]),
-              let srcH = Int(args[6]) else { return }
+              let srcH = Int(args[6]),
+              srcW > 0, srcH > 0 else { return }
 
         guard let srcCtx = getLayer(srcLayerIndex),
               let srcImage = srcCtx.makeImage() else { return }
 
-        // Raw bitmap: Guacamole Y=0 is at bottom of buffer due to flipped context
+        // Extract cursor image into a fresh context to avoid stale data
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let tmpCtx = CGContext(
+            data: nil, width: srcW, height: srcH,
+            bitsPerComponent: 8, bytesPerRow: srcW * 4, space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return }
+
+        // srcImage raw has Guac-top at pixel-bottom due to flipped context
         let rawSrcY = srcImage.height - srcY - srcH
-        let srcRect = CGRect(x: srcX, y: rawSrcY, width: srcW, height: srcH)
-        if let cropped = srcImage.cropping(to: srcRect) {
-            let image = NSImage(cgImage: cropped, size: NSSize(width: srcW, height: srcH))
-            cursorImage = image
-            cursorHotspot = CGPoint(x: hotX, y: hotY)
-            let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotX, y: hotY))
-            onCursorUpdate?(cursor)
-        }
+        tmpCtx.draw(srcImage, in: CGRect(x: -srcX, y: -rawSrcY,
+                                          width: srcImage.width, height: srcImage.height))
+
+        guard let cursorCGImage = tmpCtx.makeImage() else { return }
+
+        let image = NSImage(cgImage: cursorCGImage, size: NSSize(width: srcW, height: srcH))
+        cursorImage = image
+        cursorHotspot = CGPoint(x: hotX, y: hotY)
+        let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotX, y: hotY))
+        onCursorUpdate?(cursor)
     }
 
     private func handleSync(_ args: [String], tunnel: GuacamoleTunnel) {

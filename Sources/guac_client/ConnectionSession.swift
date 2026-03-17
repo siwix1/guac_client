@@ -14,7 +14,7 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
     var requiredFields: [String] = []
 
     init(baseURL: String, token: AuthToken, connection: GuacConnection,
-         width: Int, height: Int) {
+         width: Int, height: Int, dpi: Int = 96) {
         self.connectionID = connection.id
         self.tunnel = GuacamoleTunnel(
             baseURL: baseURL,
@@ -23,7 +23,7 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
             dataSource: connection.dataSource,
             width: width,
             height: height,
-            dpi: 96
+            dpi: dpi
         )
         self.display = GuacamoleDisplay()
         self.nsView = RemoteDisplayNSView()

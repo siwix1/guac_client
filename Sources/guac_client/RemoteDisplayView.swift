@@ -33,7 +33,7 @@ class RemoteDisplayNSView: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -48,13 +48,27 @@ class RemoteDisplayNSView: NSView {
 
     func updateCursor(_ cursor: NSCursor) {
         remoteCursor = cursor
+        // Push the cursor immediately if the mouse is inside our view
+        if let window = self.window,
+           NSMouseInRect(window.mouseLocationOutsideOfEventStream, bounds, isFlipped) {
+            cursor.set()
+        }
         window?.invalidateCursorRects(for: self)
     }
 
     override func resetCursorRects() {
+        discardCursorRects()
         if let cursor = remoteCursor {
             addCursorRect(bounds, cursor: cursor)
+        } else {
+            // Fallback: hide system cursor by using a transparent one
+            addCursorRect(bounds, cursor: .arrow)
         }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        // Override to prevent AppKit from resetting to the default arrow
+        remoteCursor?.set()
     }
 
     override func draw(_ dirtyRect: NSRect) {
