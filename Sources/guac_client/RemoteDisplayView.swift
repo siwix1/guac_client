@@ -212,15 +212,11 @@ class RemoteDisplayNSView: NSView {
             return
         }
 
-        // For character keys, use charactersIgnoringModifiers to get the base key
-        // This ensures Shift+Enter, Cmd+C etc. resolve correctly
-        let chars: String?
-        if event.modifierFlags.contains(.command) {
-            // When Cmd is held, characters may be empty — use the unmodified key
-            chars = event.charactersIgnoringModifiers
-        } else {
-            chars = event.characters ?? event.charactersIgnoringModifiers
-        }
+        // Always use the base (unmodified) character so the remote side applies
+        // modifier keys itself.  Using `event.characters` would send e.g. 'A' (0x41)
+        // while Shift is already held, which double-shifts on some RDP servers and
+        // causes the first few Shift+char strokes to be dropped or mis-cased.
+        let chars = event.charactersIgnoringModifiers
 
         if let chars {
             for char in chars {
