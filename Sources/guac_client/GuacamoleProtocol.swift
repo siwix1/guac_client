@@ -113,6 +113,10 @@ enum GuacProtocolEncoder {
         encode(opcode: "end", args: [String(streamIndex)])
     }
 
+    static func clipboard(streamIndex: Int, mimeType: String) -> String {
+        encode(opcode: "clipboard", args: [String(streamIndex), mimeType])
+    }
+
     static func nop() -> String {
         encode(opcode: "nop", args: [])
     }

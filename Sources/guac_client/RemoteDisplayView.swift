@@ -203,28 +203,83 @@ class RemoteDisplayNSView: NSView {
     /// Translate Cmd+key to Ctrl+key for the remote Windows side
     private var commandIsCtrl: Bool { true }
 
+    /// The modifier flags → keysym pairs we track, in a stable order.
+    private var modifierMap: [(NSEvent.ModifierFlags, Int)] {
+        [
+            (.shift,    0xFFE1), // Shift_L
+            (.control,  0xFFE3), // Control_L
+            (.option,   0xFFE9), // Alt_L
+            (.command,  commandIsCtrl ? 0xFFE3 : 0xFFEB), // Cmd -> Ctrl_L (or Super_L)
+        ]
+    }
+
+    /// Sync modifier state from flags.  Updates `activeModifiers` and returns
+    /// protocol instructions for any changes (used by `flagsChanged`).
+    private func syncModifiers(from flags: NSEvent.ModifierFlags) -> String {
+        var instructions = ""
+        for (flag, keysym) in modifierMap {
+            let pressed = flags.contains(flag)
+            let wasActive = activeModifiers.contains(keysym)
+            if pressed && !wasActive {
+                activeModifiers.insert(keysym)
+                instructions += GuacProtocolEncoder.key(keysym: keysym, pressed: true)
+            } else if !pressed && wasActive {
+                activeModifiers.remove(keysym)
+                instructions += GuacProtocolEncoder.key(keysym: keysym, pressed: false)
+            }
+        }
+        return instructions
+    }
+
+    /// Build modifier press instructions for every modifier currently held,
+    /// regardless of whether we already sent them.  This ensures the server
+    /// sees the modifier before the character even if a previous `flagsChanged`
+    /// WebSocket message is still in-flight.
+    /// CapsLock is excluded — it's a toggle, so redundant presses would flip it.
+    private func ensureModifiers(from flags: NSEvent.ModifierFlags) -> String {
+        var instructions = ""
+        for (flag, keysym) in modifierMap {
+            if flag == .capsLock { continue } // toggle key — don't resend
+            if flags.contains(flag) {
+                activeModifiers.insert(keysym)
+                instructions += GuacProtocolEncoder.key(keysym: keysym, pressed: true)
+            }
+        }
+        return instructions
+    }
+
     private func sendKey(event: NSEvent, pressed: Bool) {
+        let flags = event.modifierFlags
+
+        // For key-down, redundantly send all held modifiers in the same WebSocket
+        // message so ordering is guaranteed even if flagsChanged is still in-flight.
+        // For key-up, just sync normally (release any modifiers that were let go).
+        var batch = pressed
+            ? ensureModifiers(from: flags)
+            : syncModifiers(from: flags)
+
         // Handle non-character keys (arrows, function keys, delete, return, etc.)
         if KeySymMapping.isNonCharacterKey(event.keyCode) {
             if let keysym = KeySymMapping.keysym(forKeyCode: event.keyCode) {
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: pressed))
+                batch += GuacProtocolEncoder.key(keysym: keysym, pressed: pressed)
             }
+            if !batch.isEmpty { tunnel?.send(batch) }
             return
         }
 
         // Always use the base (unmodified) character so the remote side applies
-        // modifier keys itself.  Using `event.characters` would send e.g. 'A' (0x41)
-        // while Shift is already held, which double-shifts on some RDP servers and
-        // causes the first few Shift+char strokes to be dropped or mis-cased.
+        // modifier keys itself via the modifier state we already sent above.
         let chars = event.charactersIgnoringModifiers
 
         if let chars {
             for char in chars {
                 if let keysym = KeySymMapping.keysym(for: char) {
-                    tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: pressed))
+                    batch += GuacProtocolEncoder.key(keysym: keysym, pressed: pressed)
                 }
             }
         }
+
+        if !batch.isEmpty { tunnel?.send(batch) }
     }
 
     // Intercept Cmd+key shortcuts before macOS Edit menu consumes them (e.g. Cmd+V paste)
@@ -253,27 +308,21 @@ class RemoteDisplayNSView: NSView {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        // Handle modifier key changes
-        // Map Cmd -> Ctrl on the remote side so Cmd+C/V/X/A work as expected on Windows
-        let modifiers: [(NSEvent.ModifierFlags, Int)] = [
-            (.shift,   0xFFE1), // Shift_L
-            (.control, 0xFFE3), // Control_L
-            (.option,  0xFFE9), // Alt_L
-            (.command, commandIsCtrl ? 0xFFE3 : 0xFFEB), // Cmd -> Ctrl_L (or Super_L)
-        ]
+        var batch = syncModifiers(from: event.modifierFlags)
 
-        for (flag, keysym) in modifiers {
-            let pressed = event.modifierFlags.contains(flag)
-            let wasActive = activeModifiers.contains(keysym)
-
-            if pressed && !wasActive {
-                activeModifiers.insert(keysym)
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: true))
-            } else if !pressed && wasActive {
-                activeModifiers.remove(keysym)
-                tunnel?.send(GuacProtocolEncoder.key(keysym: keysym, pressed: false))
-            }
+        // CapsLock: send press when toggled on, release when toggled off.
+        // The remote side treats it as a held modifier (like Shift).
+        let capsNowOn = event.modifierFlags.contains(.capsLock)
+        let capsWasOn = activeModifiers.contains(0xFFE5)
+        if capsNowOn && !capsWasOn {
+            activeModifiers.insert(0xFFE5)
+            batch += GuacProtocolEncoder.key(keysym: 0xFFE5, pressed: true)
+        } else if !capsNowOn && capsWasOn {
+            activeModifiers.remove(0xFFE5)
+            batch += GuacProtocolEncoder.key(keysym: 0xFFE5, pressed: false)
         }
+
+        if !batch.isEmpty { tunnel?.send(batch) }
     }
 }
 
