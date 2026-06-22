@@ -10,6 +10,8 @@ A native macOS client for [Apache Guacamole](https://guacamole.apache.org/), rep
 - Recently used connections appear at the top of the list
 - Multiple simultaneous connections, each in its own native macOS window
 - Full remote desktop rendering with mouse and keyboard input
+- Layout-aware keyboard handling — resolves shifted characters via the active macOS layout, so capitals, underscore, and other shifted symbols transmit reliably
+- Clipboard sync (text copy/paste between local and remote)
 - Remote cursor rendering — shows server-provided cursors (resize, text beam, etc.)
 - macOS Cmd key mapped to Ctrl for Windows shortcuts (Cmd+C/V/X/A work as expected)
 - Key repeat support (hold to delete, hold to type, etc.)
@@ -49,11 +51,11 @@ The app connects to a Guacamole server via its REST API for authentication and c
 | `GuacamoleDisplay.swift` | Layer-based display renderer |
 | `RemoteDisplayView.swift` | NSView for rendering and input capture |
 | `KeySymMapping.swift` | macOS keycode to X11 keysym mapping |
+| `KeyboardLayout.swift` | UCKeyTranslate wrapper that resolves keycode + modifiers to the layout's actual character |
 | `ConnectionSession.swift` | Ties tunnel, display, and view together |
 
 ## Roadmap
 
-- [ ] Clipboard sync (copy/paste between local and remote)
 - [ ] Dynamic resolution on window resize
 - [ ] Auto-reconnect on connection drop
 - [ ] Fullscreen mode
