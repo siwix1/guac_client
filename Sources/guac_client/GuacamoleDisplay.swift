@@ -16,14 +16,14 @@ final class GuacamoleDisplay {
     // Active image streams: streamIndex -> StreamState
     private var streams: [Int: ImageStream] = [:]
 
-    // Cursor state
+    // Cursor state — the view reads these in draw(_:) to draw the cursor itself.
     private(set) var cursorImage: NSImage?
     private(set) var cursorHotspot: CGPoint = .zero
 
     // Callback when display updates
     var onDisplayUpdate: (() -> Void)?
-    // Callback when cursor changes
-    var onCursorUpdate: ((NSCursor) -> Void)?
+    // Callback when the cursor sprite changes.
+    var onCursorUpdate: (() -> Void)?
 
     private struct LayerProperties {
         var parentIndex: Int = 0
@@ -133,9 +133,13 @@ final class GuacamoleDisplay {
         }
 
 
-        // Recreate the layer at the new size, preserving old content if possible
-        let oldCtx = layers[layerIndex]
-        let oldImage = oldCtx?.makeImage()
+        // Negative layer indices are pseudo-layers (mouse cursor, etc). The
+        // server typically resizes them right before painting a fresh sprite,
+        // and treats the resize as a full reset. Preserving old content here
+        // would leave the previous cursor shape blended under the new one.
+        let preserveContent = layerIndex >= 0
+
+        let oldImage: CGImage? = preserveContent ? layers[layerIndex]?.makeImage() : nil
         createLayer(layerIndex, width: w, height: h)
 
         if let oldImage, let newCtx = layers[layerIndex] {
@@ -308,26 +312,16 @@ final class GuacamoleDisplay {
         guard let srcCtx = getLayer(srcLayerIndex),
               let srcImage = srcCtx.makeImage() else { return }
 
-        // Extract cursor image into a fresh context to avoid stale data
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let tmpCtx = CGContext(
-            data: nil, width: srcW, height: srcH,
-            bitsPerComponent: 8, bytesPerRow: srcW * 4, space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return }
-
-        // srcImage raw has Guac-top at pixel-bottom due to flipped context
+        // The layer's CGContext is flipped (Guac top-left origin), so the raw
+        // CGImage we just made has its rows memory-bottom-up relative to Guac
+        // coordinates. Crop in raw coords.
         let rawSrcY = srcImage.height - srcY - srcH
-        tmpCtx.draw(srcImage, in: CGRect(x: -srcX, y: -rawSrcY,
-                                          width: srcImage.width, height: srcImage.height))
+        let cropRect = CGRect(x: srcX, y: rawSrcY, width: srcW, height: srcH)
+        guard let cropped = srcImage.cropping(to: cropRect) else { return }
 
-        guard let cursorCGImage = tmpCtx.makeImage() else { return }
-
-        let image = NSImage(cgImage: cursorCGImage, size: NSSize(width: srcW, height: srcH))
-        cursorImage = image
+        cursorImage = NSImage(cgImage: cropped, size: NSSize(width: srcW, height: srcH))
         cursorHotspot = CGPoint(x: hotX, y: hotY)
-        let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotX, y: hotY))
-        onCursorUpdate?(cursor)
+        onCursorUpdate?()
     }
 
     private func handleSync(_ args: [String], tunnel: GuacamoleTunnel) {

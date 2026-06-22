@@ -45,8 +45,8 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
             self.nsView.updateDisplayImage(image)
         }
 
-        display.onCursorUpdate = { [weak self] cursor in
-            self?.nsView.updateCursor(cursor)
+        display.onCursorUpdate = { [weak self] in
+            self?.nsView.cursorDidChange()
         }
 
         tunnel.connect()

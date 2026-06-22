@@ -10,7 +10,12 @@ class RemoteDisplayNSView: NSView {
     private var buttonMask: Int = 0
     private var displayImage: CGImage?
     private var trackingArea: NSTrackingArea?
-    private var remoteCursor: NSCursor?
+    /// Last known mouse location in this view's local coordinate space, used
+    /// to position the remote cursor sprite we draw in draw(_:).
+    private var lastMouseLocation: NSPoint?
+    /// Whether we've called NSCursor.hide() while the pointer is inside the
+    /// view. Tracked so we don't double-hide / double-unhide.
+    private var systemCursorHidden = false
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -31,7 +36,7 @@ class RemoteDisplayNSView: NSView {
         return super.resignFirstResponder()
     }
 
-    override func updateTrackingAreas() {
+override func updateTrackingAreas() {
         super.updateTrackingAreas()
         updateTrackingArea()
     }
@@ -55,29 +60,10 @@ class RemoteDisplayNSView: NSView {
         needsDisplay = true
     }
 
-    func updateCursor(_ cursor: NSCursor) {
-        remoteCursor = cursor
-        // Push the cursor immediately if the mouse is inside our view
-        if let window = self.window,
-           NSMouseInRect(window.mouseLocationOutsideOfEventStream, bounds, isFlipped) {
-            cursor.set()
-        }
-        window?.invalidateCursorRects(for: self)
-    }
-
-    override func resetCursorRects() {
-        discardCursorRects()
-        if let cursor = remoteCursor {
-            addCursorRect(bounds, cursor: cursor)
-        } else {
-            // Fallback: hide system cursor by using a transparent one
-            addCursorRect(bounds, cursor: .arrow)
-        }
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        // Override to prevent AppKit from resetting to the default arrow
-        remoteCursor?.set()
+    /// Called when the server sends a new cursor sprite. The view draws the
+    /// cursor itself in draw(_:), so we just need a repaint.
+    func cursorDidChange() {
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -87,35 +73,69 @@ class RemoteDisplayNSView: NSView {
         ctx.setFillColor(CGColor.black)
         ctx.fill(bounds)
 
-        guard let image = displayImage else { return }
-
-        // Scale to fit, maintaining aspect ratio
-        let imageSize = CGSize(width: image.width, height: image.height)
-        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
-        let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        let origin = CGPoint(
-            x: (bounds.width - scaledSize.width) / 2,
-            y: (bounds.height - scaledSize.height) / 2
-        )
+        guard let image = displayImage, let transform = framebufferTransform() else { return }
 
         // Use no interpolation at 1:1 for pixel-perfect sharpness, high quality when scaling
-        ctx.interpolationQuality = abs(scale - 1.0) < 0.01 ? .none : .high
+        ctx.interpolationQuality = abs(transform.scale - 1.0) < 0.01 ? .none : .high
         // Flip the image vertically around its center
         ctx.saveGState()
-        let centerY = origin.y + scaledSize.height / 2
+        let centerY = transform.origin.y + transform.scaledSize.height / 2
         ctx.translateBy(x: 0, y: centerY)
         ctx.scaleBy(x: 1, y: -1)
         ctx.translateBy(x: 0, y: -centerY)
-        ctx.draw(image, in: CGRect(origin: origin, size: scaledSize))
+        ctx.draw(image, in: CGRect(origin: transform.origin, size: transform.scaledSize))
+        ctx.restoreGState()
+
+        drawRemoteCursor(in: ctx, transform: transform)
+    }
+
+    private func drawRemoteCursor(in ctx: CGContext, transform: FramebufferTransform) {
+        // Fall back to the window's current pointer location if we haven't
+        // received a mouseMoved/mouseEntered yet.
+        let mouseLocal: NSPoint
+        if let known = lastMouseLocation {
+            mouseLocal = known
+        } else if let window {
+            mouseLocal = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        } else {
+            return
+        }
+
+        guard let display,
+              let cursorImage = display.cursorImage,
+              let cursorCG = cursorImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return }
+
+        let hotspot = display.cursorHotspot
+        let scaledW = CGFloat(cursorCG.width) * transform.scale
+        let scaledH = CGFloat(cursorCG.height) * transform.scale
+        let drawX = mouseLocal.x - hotspot.x * transform.scale
+        let drawY = mouseLocal.y - hotspot.y * transform.scale
+
+        ctx.saveGState()
+        // The cursor bitmap came from a flipped CGContext (Guac top-left
+        // origin), so its rows are memory-bottom-up. Flip vertically around
+        // the cursor's own center so it renders upright in this isFlipped view.
+        let centerY = drawY + scaledH / 2
+        ctx.translateBy(x: 0, y: centerY)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.translateBy(x: 0, y: -centerY)
+        ctx.interpolationQuality = .none
+        ctx.draw(cursorCG, in: CGRect(x: drawX, y: drawY, width: scaledW, height: scaledH))
         ctx.restoreGState()
     }
 
     // MARK: - Coordinate mapping
 
-    private func remotePoint(from event: NSEvent) -> (x: Int, y: Int)? {
-        guard let image = displayImage else { return nil }
-        let local = convert(event.locationInWindow, from: nil)
+    private struct FramebufferTransform {
+        let scale: CGFloat
+        let origin: CGPoint
+        let scaledSize: CGSize
+        let imageSize: CGSize
+    }
 
+    private func framebufferTransform() -> FramebufferTransform? {
+        guard let image = displayImage else { return nil }
         let imageSize = CGSize(width: image.width, height: image.height)
         let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
         let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
@@ -123,12 +143,18 @@ class RemoteDisplayNSView: NSView {
             x: (bounds.width - scaledSize.width) / 2,
             y: (bounds.height - scaledSize.height) / 2
         )
+        return FramebufferTransform(scale: scale, origin: origin, scaledSize: scaledSize, imageSize: imageSize)
+    }
 
-        let remoteX = (local.x - origin.x) / scale
-        let remoteY = (local.y - origin.y) / scale // isFlipped=true, so Y is already top-down
+    private func remotePoint(from event: NSEvent) -> (x: Int, y: Int)? {
+        guard let transform = framebufferTransform() else { return nil }
+        let local = convert(event.locationInWindow, from: nil)
 
-        guard remoteX >= 0 && remoteX < imageSize.width &&
-              remoteY >= 0 && remoteY < imageSize.height else { return nil }
+        let remoteX = (local.x - transform.origin.x) / transform.scale
+        let remoteY = (local.y - transform.origin.y) / transform.scale // isFlipped=true, so Y is already top-down
+
+        guard remoteX >= 0 && remoteX < transform.imageSize.width &&
+              remoteY >= 0 && remoteY < transform.imageSize.height else { return nil }
 
         return (Int(remoteX), Int(remoteY))
     }
@@ -136,8 +162,54 @@ class RemoteDisplayNSView: NSView {
     // MARK: - Mouse events
 
     private func sendMouse(_ event: NSEvent) {
+        lastMouseLocation = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+
         guard let point = remotePoint(from: event) else { return }
         tunnel?.send(GuacProtocolEncoder.mouse(x: point.x, y: point.y, buttonMask: buttonMask))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        // Only take over the cursor once we actually have a remote frame to
+        // show. Before then the view is just a black background — possibly
+        // sitting behind our own SwiftUI credentials prompt — and hiding the
+        // system cursor there would leave the user with nothing.
+        if displayImage != nil && !systemCursorHidden {
+            NSCursor.hide()
+            systemCursorHidden = true
+        }
+        lastMouseLocation = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        // Catch the case where the remote frame arrived *after* mouseEntered,
+        // so we missed our chance to hide the system cursor.
+        if displayImage != nil && !systemCursorHidden {
+            NSCursor.hide()
+            systemCursorHidden = true
+        }
+        sendMouse(event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if systemCursorHidden {
+            NSCursor.unhide()
+            systemCursorHidden = false
+        }
+        lastMouseLocation = nil
+        needsDisplay = true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        // If the view is removed from the window hierarchy while the system
+        // cursor is hidden, restore it — otherwise the user is left with no
+        // cursor anywhere on the OS.
+        if newWindow == nil && systemCursorHidden {
+            NSCursor.unhide()
+            systemCursorHidden = false
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -167,10 +239,6 @@ class RemoteDisplayNSView: NSView {
 
     override func otherMouseUp(with event: NSEvent) {
         buttonMask &= ~2
-        sendMouse(event)
-    }
-
-    override func mouseMoved(with event: NSEvent) {
         sendMouse(event)
     }
 
