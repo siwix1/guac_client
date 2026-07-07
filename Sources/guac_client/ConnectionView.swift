@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ConnectionView: View {
     let session: ConnectionSession
@@ -9,6 +10,7 @@ struct ConnectionView: View {
     @State private var showCredentials = false
     @State private var credentialFields: [String] = []
     @State private var credentialValues: [String: String] = [:]
+    @State private var isDroppingFile = false
 
     /// UserDefaults key for saved remote credentials per connection
     private var credentialsSaveKey: String { "rdpCreds_\(connectionID)" }
@@ -29,6 +31,25 @@ struct ConnectionView: View {
                         showCredentials = false
                     }
                 }
+
+                if isDroppingFile {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.accentColor, lineWidth: 3)
+                        .background(Color.accentColor.opacity(0.1))
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: [.fileURL], isTargeted: $isDroppingFile) { providers in
+                for provider in providers {
+                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                        guard let url else { return }
+                        Task { @MainActor in
+                            session.uploadFile(url: url)
+                        }
+                    }
+                }
+                return true
             }
         }
         .onAppear {
@@ -49,6 +70,20 @@ struct ConnectionView: View {
                     UserDefaults.standard.set(credentialValues, forKey: credentialsSaveKey)
                 } else {
                     showCredentials = true
+                }
+            }
+        }
+    }
+
+    private func pickFileForUpload() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { response in
+            if response == .OK {
+                for url in panel.urls {
+                    session.uploadFile(url: url)
                 }
             }
         }

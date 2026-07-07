@@ -115,12 +115,30 @@ final class AppState {
             return
         }
 
-        // Use logical (point) resolution so the remote desktop renders at a
-        // comfortable size — the Retina backing scale is handled locally.
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
-        let pixelWidth = Int(screenFrame.width)
-        let pixelHeight = Int(screenFrame.height)
+        // Build the window and put it into full screen FIRST, then connect the
+        // remote at the resulting resolution. RDP negotiates resolution at
+        // connect time and the guacd RDP backend ignores runtime `size`
+        // instructions unless the connection enables dynamic resize — so
+        // whatever size we connect at is what sticks. Entering full screen
+        // before connecting means the desktop is negotiated at the full-screen
+        // resolution and fills the display with no letterbox.
+        makeConnectionWindow(connection: connection) { [weak self] window in
+            guard let self else { return }
+            self.connectSession(connection: connection, baseURL: baseURL, token: token, in: window)
+        }
+    }
+
+    /// Connect a session sized to the (now settled) window and mount its view.
+    private func connectSession(connection: GuacConnection, baseURL: String, token: AuthToken, in window: NSWindow) {
+        // Request the window's point size at a normal 96 DPI. Testing showed
+        // guacd's RDP backend treats a high dpi (e.g. 192) as a scale factor and
+        // *halves* the pixel resolution — 2560×1279 @192 came back as 1280×639,
+        // which is why the desktop looked low-res. So we keep DPI at 96 and ask
+        // for the full point resolution, which gives a crisp, readable desktop
+        // that fills the window.
+        let contentSize = window.contentView?.bounds.size ?? NSSize(width: 1280, height: 800)
+        let pixelWidth = Int(contentSize.width.rounded())
+        let pixelHeight = Int(contentSize.height.rounded())
         let dpi = 96
 
         let session = ConnectionSession(
@@ -139,11 +157,11 @@ final class AppState {
             self?.closeSession(connectionID: connection.id)
         }
 
+        // Attach the session's remote view to the already-visible window.
+        installConnectionView(session: session, connection: connection, in: window)
+
         session.start()
         activeSessions[connection.id] = session
-
-        // Open a new window for this connection
-        openConnectionWindow(session: session, connection: connection)
     }
 
     func closeSession(connectionID: String) {
@@ -177,35 +195,42 @@ final class AppState {
         UserDefaults.standard.removeObject(forKey: "savedAvailableDataSources")
     }
 
-    private func openConnectionWindow(session: ConnectionSession, connection: GuacConnection) {
-        let connectionView = ConnectionView(
-            session: session,
-            connectionID: session.connectionID,
-            defaultUsername: username
-        ) { [weak self] in
-            self?.closeSession(connectionID: connection.id)
-        }
-
-        let hostingView = NSHostingView(rootView: connectionView)
-
+    /// Create, show, and put the connection window into full screen with an
+    /// empty content view, then call `onReady` once the window has settled at
+    /// its final size — so the caller can measure it and connect the remote at
+    /// that resolution. `onReady` fires on the main actor.
+    private func makeConnectionWindow(connection: GuacConnection, onReady: @escaping (NSWindow) -> Void) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.contentView = hostingView
         window.title = connection.name
         window.setFrameAutosaveName("connection_\(connection.id)")
         window.center()
+        window.collectionBehavior.insert(.fullScreenPrimary)
 
         let controller = NSWindowController(window: window)
         windowControllers[connection.id] = controller
 
-        // Handle window close via X button
-        let delegate = ConnectionWindowDelegate { [weak self] in
-            self?.closeSession(connectionID: connection.id)
+        // Fire onReady exactly once, whether we get there via the full-screen
+        // transition or the fallback timer.
+        var didFire = false
+        let ready: (NSWindow) -> Void = { win in
+            guard !didFire else { return }
+            didFire = true
+            win.layoutIfNeeded()
+            onReady(win)
         }
+
+        let delegate = ConnectionWindowDelegate(
+            onClose: { [weak self] in self?.closeSession(connectionID: connection.id) },
+            onEnterFullScreen: { [weak window] in
+                guard let window else { return }
+                ready(window)
+            }
+        )
         window.delegate = delegate
         // Retain the delegate
         objc_setAssociatedObject(window, "windowDelegate", delegate, .OBJC_ASSOCIATION_RETAIN)
@@ -213,21 +238,49 @@ final class AppState {
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
 
-        // Maximize the window
-        window.zoom(nil)
+        // Enter full screen; we connect once the transition completes (above).
+        window.toggleFullScreen(nil)
+
+        // Fallback: if the full-screen transition never reports back (e.g. it's
+        // blocked or already full screen), connect anyway after a short delay so
+        // we never hang without a session.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak window] in
+            guard let window else { return }
+            ready(window)
+        }
+    }
+
+    /// Mount the session's remote-display SwiftUI view into an existing window.
+    private func installConnectionView(session: ConnectionSession, connection: GuacConnection, in window: NSWindow) {
+        let connectionView = ConnectionView(
+            session: session,
+            connectionID: session.connectionID,
+            defaultUsername: username
+        ) { [weak self] in
+            self?.closeSession(connectionID: connection.id)
+        }
+        window.contentView = NSHostingView(rootView: connectionView)
     }
 }
 
 class ConnectionWindowDelegate: NSObject, NSWindowDelegate {
     let onClose: () -> Void
+    let onEnterFullScreen: (() -> Void)?
 
-    init(onClose: @escaping () -> Void) {
+    init(onClose: @escaping () -> Void, onEnterFullScreen: (() -> Void)? = nil) {
         self.onClose = onClose
+        self.onEnterFullScreen = onEnterFullScreen
     }
 
     func windowWillClose(_ notification: Notification) {
         Task { @MainActor in
             onClose()
+        }
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        Task { @MainActor in
+            onEnterFullScreen?()
         }
     }
 }

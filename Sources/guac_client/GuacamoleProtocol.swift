@@ -117,6 +117,16 @@ enum GuacProtocolEncoder {
         encode(opcode: "clipboard", args: [String(streamIndex), mimeType])
     }
 
+    // File transfer: client-initiated upload to a filesystem object
+    static func put(objectIndex: Int, streamIndex: Int, mimeType: String, name: String) -> String {
+        encode(opcode: "put", args: [String(objectIndex), String(streamIndex), mimeType, name])
+    }
+
+    // Request a file/directory listing from a filesystem object
+    static func get(objectIndex: Int, name: String) -> String {
+        encode(opcode: "get", args: [String(objectIndex), name])
+    }
+
     static func nop() -> String {
         encode(opcode: "nop", args: [])
     }

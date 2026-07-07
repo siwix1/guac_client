@@ -17,6 +17,14 @@ class RemoteDisplayNSView: NSView {
     /// view. Tracked so we don't double-hide / double-unhide.
     private var systemCursorHidden = false
 
+    /// Called (debounced) with the view's logical size when it changes, so the
+    /// session can ask the server to re-render the desktop to match — this is
+    /// what stops the remote framebuffer from being letterboxed in the window.
+    var onSizeChange: ((CGSize) -> Void)?
+    /// Pending resize notification, cancelled and rescheduled while the user is
+    /// actively dragging the window edge so we only fire once they settle.
+    private var resizeWorkItem: DispatchWorkItem?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override var canBecomeKeyView: Bool { true }
@@ -53,6 +61,30 @@ override func updateTrackingAreas() {
         )
         addTrackingArea(area)
         trackingArea = area
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        scheduleResizeNotification()
+    }
+
+    /// Debounce resize notifications: live-dragging a window edge fires
+    /// setFrameSize dozens of times a second, but we only want to send the
+    /// server one `size` instruction once the user stops.
+    private func scheduleResizeNotification() {
+        resizeWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Report the view's point size — the connection is established at
+            // point resolution with a high DPI (matching RDP's Retina mode), so
+            // resize requests must use the same units to keep the aspect and
+            // density consistent.
+            let size = self.bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            self.onSizeChange?(size)
+        }
+        resizeWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     func updateDisplayImage(_ image: CGImage?) {
@@ -137,6 +169,11 @@ override func updateTrackingAreas() {
     private func framebufferTransform() -> FramebufferTransform? {
         guard let image = displayImage else { return nil }
         let imageSize = CGSize(width: image.width, height: image.height)
+        // Aspect-FIT. We connect at the maximized window's exact resolution, so
+        // the framebuffer aspect already matches the view and there's normally
+        // no leftover space. Fitting (rather than filling) means that if the two
+        // ever differ slightly, we show the whole remote desktop with a hairline
+        // bar instead of cropping a strip (e.g. the taskbar) off-screen.
         let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
         let scaledSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
         let origin = CGPoint(
