@@ -9,6 +9,15 @@ protocol GuacamoleTunnelDelegate: AnyObject, Sendable {
 final class GuacamoleTunnel: @unchecked Sendable {
     private let url: URL
     private var task: URLSessionWebSocketTask?
+    /// The tunnel needs its own session rather than `URLSession.shared`:
+    /// the shared session ignores custom delegates, so a trust challenge on
+    /// the WebSocket would never reach our handler and the connection would
+    /// fail even after the user approved the certificate for the REST API.
+    private let session: URLSession = URLSession(
+        configuration: .default,
+        delegate: GuacURLSessionDelegate(),
+        delegateQueue: nil
+    )
     private let parser = Mutex(GuacProtocolParser())
     private var nextStreamIndex = 0
     weak var delegate: GuacamoleTunnelDelegate?
@@ -42,7 +51,7 @@ final class GuacamoleTunnel: @unchecked Sendable {
 
     func connect() {
         print("WebSocket connecting to: \(url)")
-        let wsTask = URLSession.shared.webSocketTask(with: url, protocols: ["guacamole"])
+        let wsTask = session.webSocketTask(with: url, protocols: ["guacamole"])
         self.task = wsTask
         wsTask.resume()
         print("WebSocket task resumed")

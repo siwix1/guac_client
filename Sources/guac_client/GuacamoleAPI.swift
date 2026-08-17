@@ -1,13 +1,5 @@
 import Foundation
 
-private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest) async -> URLRequest? {
-        return nil  // Don't follow redirects
-    }
-}
-
 struct AuthToken: Sendable {
     let token: String
     let dataSource: String
@@ -36,7 +28,9 @@ actor GuacamoleAPI {
 
     init(baseURL: String) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        self.session = URLSession(configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        self.session = URLSession(configuration: .default,
+                                  delegate: GuacURLSessionDelegate(),
+                                  delegateQueue: nil)
     }
 
     /// Build a request with headers that prevent HTML redirects
