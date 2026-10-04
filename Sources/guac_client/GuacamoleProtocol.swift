@@ -6,10 +6,17 @@ struct GuacInstruction: Sendable {
 }
 
 struct GuacProtocolParser: Sendable {
-    private var buffer: String = ""
+    /// Buffered bytes, not Characters: Guacamole length prefixes count UTF-8
+    /// code units, so indexing by Character would desync the reader on any
+    /// non-ASCII value (clipboard text, window titles).
+    private var buffer: [UInt8] = []
+
+    private static let dot = UInt8(ascii: ".")
+    private static let comma = UInt8(ascii: ",")
+    private static let semicolon = UInt8(ascii: ";")
 
     mutating func receive(_ text: String) -> [GuacInstruction] {
-        buffer.append(text)
+        buffer.append(contentsOf: Array(text.utf8))
         var instructions: [GuacInstruction] = []
 
         while let instruction = parseNext() {
@@ -21,49 +28,45 @@ struct GuacProtocolParser: Sendable {
 
     private mutating func parseNext() -> GuacInstruction? {
         var elements: [String] = []
-        var position = buffer.startIndex
+        var position = 0
 
-        while position < buffer.endIndex {
+        while position < buffer.count {
             // Read the length prefix
-            guard let dotIndex = buffer[position...].firstIndex(of: ".") else {
-                return nil
+            guard let dotIndex = buffer[position...].firstIndex(of: Self.dot) else {
+                return nil // Need more data
             }
 
-            guard let length = Int(buffer[position..<dotIndex]) else {
-                // Malformed — skip to next semicolon
-                if let semi = buffer[position...].firstIndex(of: ";") {
-                    buffer = String(buffer[buffer.index(after: semi)...])
+            guard let length = Int(String(decoding: buffer[position..<dotIndex], as: UTF8.self)),
+                  length >= 0 else {
+                // Malformed — resync past the next instruction terminator
+                if let semi = buffer[position...].firstIndex(of: Self.semicolon) {
+                    buffer.removeFirst(semi + 1)
                 }
                 return nil
             }
 
-            let valueStart = buffer.index(after: dotIndex)
-            let valueEnd = buffer.index(valueStart, offsetBy: length, limitedBy: buffer.endIndex)
-            guard let valueEnd else {
-                return nil // Need more data
+            let valueStart = dotIndex + 1
+            let valueEnd = valueStart + length
+            guard valueEnd < buffer.count else {
+                return nil // Need the value plus its separator
             }
 
-            let value = String(buffer[valueStart..<valueEnd])
-            elements.append(value)
-
-            guard valueEnd < buffer.endIndex else {
-                return nil // Need more data
-            }
+            elements.append(String(decoding: buffer[valueStart..<valueEnd], as: UTF8.self))
 
             let separator = buffer[valueEnd]
-            position = buffer.index(after: valueEnd)
+            position = valueEnd + 1
 
-            if separator == ";" {
+            if separator == Self.semicolon {
                 // Instruction complete
-                buffer = String(buffer[position...])
+                buffer.removeFirst(position)
                 guard let opcode = elements.first else { return nil }
                 return GuacInstruction(opcode: opcode, args: Array(elements.dropFirst()))
-            } else if separator == "," {
+            } else if separator == Self.comma {
                 // More arguments follow
                 continue
             } else {
-                // Unexpected character — discard
-                buffer = String(buffer[position...])
+                // Unexpected character — discard what we've consumed
+                buffer.removeFirst(position)
                 return nil
             }
         }
@@ -74,9 +77,14 @@ struct GuacProtocolParser: Sendable {
 
 enum GuacProtocolEncoder {
     static func encode(opcode: String, args: [String]) -> String {
-        var parts = ["\(opcode.count).\(opcode)"]
+        // Guacamole length prefixes count UTF-8 code units, not Swift
+        // Characters. These differ for any non-ASCII value (accented letters in
+        // a password, curly quotes in clipboard text, emoji), and a short
+        // prefix desyncs guacd's reader mid-instruction — it closes the socket
+        // with no error instruction.
+        var parts = ["\(opcode.utf8.count).\(opcode)"]
         for arg in args {
-            parts.append("\(arg.count).\(arg)")
+            parts.append("\(arg.utf8.count).\(arg)")
         }
         return parts.joined(separator: ",") + ";"
     }

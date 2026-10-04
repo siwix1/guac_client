@@ -11,6 +11,10 @@ struct ConnectionView: View {
     @State private var credentialFields: [String] = []
     @State private var credentialValues: [String: String] = [:]
     @State private var isDroppingFile = false
+    @State private var credentialError: String?
+    /// Set once saved credentials have been auto-submitted, so a subsequent
+    /// auth failure knows not to silently replay them again.
+    @State private var didAutoSubmit = false
 
     /// UserDefaults key for saved remote credentials per connection
     private var credentialsSaveKey: String { "rdpCreds_\(connectionID)" }
@@ -24,10 +28,12 @@ struct ConnectionView: View {
                     Color.black.opacity(0.5)
                     RDPCredentialsView(
                         fields: credentialFields,
-                        values: $credentialValues
+                        values: $credentialValues,
+                        errorMessage: credentialError
                     ) {
                         UserDefaults.standard.set(credentialValues, forKey: credentialsSaveKey)
                         session.sendCredentials(credentialValues)
+                        credentialError = nil
                         showCredentials = false
                     }
                 }
@@ -64,12 +70,29 @@ struct ConnectionView: View {
                         credentialValues[field] = field == "username" ? defaultUsername : ""
                     }
                 }
-                // Auto-submit if we have all fields filled from saved values
-                if fields.allSatisfy({ !(credentialValues[$0] ?? "").isEmpty }) {
+                // Auto-submit if we have all fields filled from saved values.
+                // Only once per session: if the server rejects them we must
+                // not silently replay the same bad credentials forever.
+                let allFilled = fields.allSatisfy { !(credentialValues[$0] ?? "").isEmpty }
+                if allFilled && !didAutoSubmit {
+                    didAutoSubmit = true
                     session.sendCredentials(credentialValues)
                     UserDefaults.standard.set(credentialValues, forKey: credentialsSaveKey)
                 } else {
                     showCredentials = true
+                }
+            }
+
+            session.onServerError = { _, status in
+                // 769 = CLIENT_UNAUTHORIZED: the remote host rejected the
+                // login. guacd drops the tunnel immediately after, so we can't
+                // retry in place — just discard the bad saved password so the
+                // next connect prompts instead of replaying what just failed.
+                // The message itself is surfaced by AppState on disconnect.
+                if status == 769 {
+                    var saved = UserDefaults.standard.dictionary(forKey: credentialsSaveKey) as? [String: String] ?? [:]
+                    saved["password"] = ""
+                    UserDefaults.standard.set(saved, forKey: credentialsSaveKey)
                 }
             }
         }
@@ -93,6 +116,8 @@ struct ConnectionView: View {
 struct RDPCredentialsView: View {
     let fields: [String]
     @Binding var values: [String: String]
+    /// Why the previous attempt failed, if it did.
+    var errorMessage: String?
     let onSubmit: () -> Void
     @FocusState private var focusedField: String?
 
@@ -101,6 +126,14 @@ struct RDPCredentialsView: View {
             Text("Remote Login")
                 .font(.title3)
                 .fontWeight(.semibold)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(spacing: 10) {
                 ForEach(fields, id: \.self) { field in

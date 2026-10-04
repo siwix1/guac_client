@@ -9,6 +9,14 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
     let nsView: RemoteDisplayNSView
     var onDisconnect: ((String?) -> Void)?
     var onCredentialsRequired: (([String]) -> Void)?
+    /// Server-reported protocol error (message, Guacamole status code). Fires
+    /// before the disconnect that follows it, so the UI can show the real
+    /// reason instead of the generic socket error.
+    var onServerError: ((String, Int) -> Void)?
+
+    /// Last error guacd reported. The socket drop that follows carries only a
+    /// generic "Socket is not connected", so this is the message worth showing.
+    private var lastServerError: String?
 
     /// DPI the connection was established with, reused when the view resizes so
     /// the server keeps rendering at the same pixel density.
@@ -293,6 +301,16 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
                     requiredFields = instruction.args
                     onCredentialsRequired?(instruction.args)
 
+                case "error":
+                    // error,MESSAGE,STATUS — guacd reports why it's about to
+                    // hang up. Without this the socket just dies and the user
+                    // sees an unpainted black display.
+                    let message = instruction.args.first ?? "Unknown error"
+                    let status = Int(instruction.args.count >= 2 ? instruction.args[1] : "") ?? 0
+                    print("Server error \(status): \(message)")
+                    lastServerError = message
+                    onServerError?(message, status)
+
                 case "filesystem":
                     // filesystem,OBJECT_INDEX,NAME
                     if instruction.args.count >= 2,
@@ -379,9 +397,11 @@ final class ConnectionSession: GuacamoleTunnelDelegate {
     }
 
     nonisolated func tunnelDidDisconnect(error: Error?) {
-        let message = error?.localizedDescription
+        let socketMessage = error?.localizedDescription
         Task { @MainActor in
-            onDisconnect?(message)
+            // Prefer guacd's own explanation; the socket error that follows it
+            // is just "Socket is not connected" and tells the user nothing.
+            onDisconnect?(lastServerError ?? socketMessage)
         }
     }
 }

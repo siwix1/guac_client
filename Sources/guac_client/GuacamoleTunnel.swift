@@ -20,6 +20,9 @@ final class GuacamoleTunnel: @unchecked Sendable {
     )
     private let parser = Mutex(GuacProtocolParser())
     private var nextStreamIndex = 0
+    /// Set once the socket has failed or been closed, so a burst of queued
+    /// sends can't each log the same error against a dead task.
+    private let closed = Mutex(false)
     weak var delegate: GuacamoleTunnelDelegate?
 
     func allocateStreamIndex() -> Int {
@@ -61,17 +64,41 @@ final class GuacamoleTunnel: @unchecked Sendable {
     }
 
     func send(_ text: String) {
-        task?.send(.string(text)) { error in
-            if let error {
-                print("WebSocket send error: \(error)")
-            }
+        if closed.withLock({ $0 }) { return }
+        task?.send(.string(text)) { [weak self] error in
+            guard let self, let error else { return }
+            // First failure wins: tear the tunnel down and report once rather
+            // than logging an identical error for every queued send.
+            self.fail(with: error)
         }
     }
 
     func disconnect() {
-        send(GuacProtocolEncoder.disconnect())
+        let alreadyClosed = closed.withLock { wasClosed -> Bool in
+            let previous = wasClosed
+            wasClosed = true
+            return previous
+        }
+        guard !alreadyClosed else { return }
+
+        // Send before marking closed above would be racy; emit directly.
+        task?.send(.string(GuacProtocolEncoder.disconnect())) { _ in }
         task?.cancel(with: .normalClosure, reason: nil)
         delegate?.tunnelDidDisconnect(error: nil)
+    }
+
+    /// Mark the tunnel dead and notify the delegate exactly once.
+    private func fail(with error: Error) {
+        let alreadyClosed = closed.withLock { wasClosed -> Bool in
+            let previous = wasClosed
+            wasClosed = true
+            return previous
+        }
+        guard !alreadyClosed else { return }
+
+        print("WebSocket failed: \(error)")
+        task?.cancel(with: .abnormalClosure, reason: nil)
+        delegate?.tunnelDidDisconnect(error: error)
     }
 
     private func receiveLoop() {
@@ -102,17 +129,17 @@ final class GuacamoleTunnel: @unchecked Sendable {
                 self.receiveLoop()
 
             case .failure(let error):
-                print("WebSocket error: \(error)")
-                self.delegate?.tunnelDidDisconnect(error: error)
+                self.fail(with: error)
             }
         }
     }
 
     private func startKeepAlive() {
-        Task {
+        Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
-                send(GuacProtocolEncoder.nop())
+                guard let self, !self.closed.withLock({ $0 }) else { return }
+                self.send(GuacProtocolEncoder.nop())
             }
         }
     }
