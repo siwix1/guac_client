@@ -115,6 +115,64 @@ final class AppState {
             return
         }
 
+        // Another session (e.g. one left open at home) may be holding this
+        // connection. Guacamole rejects the new session with "too many
+        // connections", so offer to take it over: kill the existing session(s)
+        // via the REST API, then connect fresh. The underlying RDP/VNC target
+        // keeps running, so reconnecting lands back in the same desktop.
+        if connection.activeConnections > 0 {
+            Task { await takeOverIfNeeded(connection: connection, token: token) }
+            return
+        }
+
+        startConnection(to: connection, token: token)
+    }
+
+    /// Fetch the live sessions for a connection, ask the user to confirm a
+    /// take-over, kill them, then start the connection.
+    private func takeOverIfNeeded(connection: GuacConnection, token: AuthToken) async {
+        let sessions: [GuacActiveConnection]
+        do {
+            sessions = try await api.activeConnections(token: token, for: connection.id)
+        } catch {
+            // If we can't enumerate sessions, just try to connect and let the
+            // server report any error.
+            startConnection(to: connection, token: token)
+            return
+        }
+
+        guard !sessions.isEmpty else {
+            startConnection(to: connection, token: token)
+            return
+        }
+
+        guard confirmTakeOver(connection: connection, sessions: sessions) else { return }
+
+        do {
+            try await api.killActiveConnections(token: token, sessions: sessions)
+            // Give guacd a moment to release the connection slot before we grab it.
+            try? await Task.sleep(for: .milliseconds(500))
+            await loadConnections()
+            startConnection(to: connection, token: token)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Native confirmation alert for taking over an existing session.
+    private func confirmTakeOver(connection: GuacConnection, sessions: [GuacActiveConnection]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "“\(connection.name)” is already in use"
+        let hosts = sessions.compactMap { $0.remoteHost }.filter { !$0.isEmpty }
+        let where_ = hosts.isEmpty ? "" : " (from \(hosts.joined(separator: ", ")))"
+        alert.informativeText = "There \(sessions.count == 1 ? "is" : "are") \(sessions.count) active session\(sessions.count == 1 ? "" : "s")\(where_). Disconnect \(sessions.count == 1 ? "it" : "them") and take over?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Take Over")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func startConnection(to connection: GuacConnection, token: AuthToken) {
         // Build the window and put it into full screen FIRST, then connect the
         // remote at the resulting resolution. RDP negotiates resolution at
         // connect time and the guacd RDP backend ignores runtime `size`

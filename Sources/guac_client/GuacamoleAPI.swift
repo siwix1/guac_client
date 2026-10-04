@@ -15,6 +15,17 @@ struct GuacConnection: Identifiable, Sendable {
     let dataSource: String
 }
 
+/// A live session as reported by /activeConnections.
+struct GuacActiveConnection: Sendable {
+    /// UUID of the active connection — the handle used to kill it.
+    let identifier: String
+    /// Identifier of the underlying connection this session belongs to.
+    let connectionIdentifier: String
+    let username: String?
+    let remoteHost: String?
+    let dataSource: String
+}
+
 enum AuthState: Sendable {
     case needsCredentials
     case needsTOTP(username: String, password: String)
@@ -148,5 +159,71 @@ actor GuacamoleAPI {
         }
 
         return connections.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Fetch all live sessions for the given connection across every data source.
+    /// Guacamole scopes active connections per data source, so we ask each one and
+    /// keep only the sessions belonging to `connectionID`.
+    func activeConnections(token: AuthToken, for connectionID: String) async throws -> [GuacActiveConnection] {
+        var result: [GuacActiveConnection] = []
+        for dataSource in token.availableDataSources {
+            let sessions = try await fetchActiveConnections(token: token.token, dataSource: dataSource)
+            result.append(contentsOf: sessions.filter { $0.connectionIdentifier == connectionID })
+        }
+        return result
+    }
+
+    private func fetchActiveConnections(token: String, dataSource: String) async throws -> [GuacActiveConnection] {
+        let url = URL(string: "\(baseURL)/api/session/data/\(dataSource)/activeConnections?token=\(token)")!
+        let request = apiRequest(url: url)
+
+        let (data, response) = try await session.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+
+        guard httpResponse.statusCode == 200, !isHTMLResponse(data, httpResponse) else { return [] }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+
+        var sessions: [GuacActiveConnection] = []
+        for (identifier, value) in json {
+            guard let entry = value as? [String: Any],
+                  let connectionIdentifier = entry["connectionIdentifier"] as? String else { continue }
+            sessions.append(GuacActiveConnection(
+                identifier: identifier,
+                connectionIdentifier: connectionIdentifier,
+                username: entry["username"] as? String,
+                remoteHost: entry["remoteHost"] as? String,
+                dataSource: dataSource
+            ))
+        }
+        return sessions
+    }
+
+    /// Terminate the given live sessions. Guacamole kills active connections via a
+    /// PATCH with "remove" ops against /activeConnections, one call per data source.
+    /// Throws if the server rejects a kill (e.g. insufficient permissions).
+    func killActiveConnections(token: AuthToken, sessions: [GuacActiveConnection]) async throws {
+        let byDataSource = Dictionary(grouping: sessions, by: { $0.dataSource })
+
+        for (dataSource, group) in byDataSource {
+            let url = URL(string: "\(baseURL)/api/session/data/\(dataSource)/activeConnections?token=\(token.token)")!
+            var request = apiRequest(url: url, method: "PATCH")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let ops = group.map { ["op": "remove", "path": "/\($0.identifier)"] }
+            request.httpBody = try JSONSerialization.data(withJSONObject: ops)
+
+            let (data, response) = try await session.data(for: request)
+            let httpResponse = response as! HTTPURLResponse
+
+            guard (200...204).contains(httpResponse.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw NSError(domain: "GuacamoleAPI", code: httpResponse.statusCode, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to disconnect existing session (\(httpResponse.statusCode)): \(body)"
+                ])
+            }
+        }
     }
 }
