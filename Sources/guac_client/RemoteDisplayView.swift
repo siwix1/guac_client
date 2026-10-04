@@ -307,15 +307,13 @@ override func updateTrackingAreas() {
 
     // MARK: - Keyboard events
 
-    // Track which modifier keysyms are currently pressed
-    private var activeModifiers: Set<Int> = []
 
     /// Translate Cmd+key to Ctrl+key for the remote Windows side
     private var commandIsCtrl: Bool { true }
 
     /// Modifier flags we track.  Each entry maps a macOS flag to a unique
     /// internal key and its remote keysym.  We use the internal key (not the
-    /// keysym) for `activeModifiers` so that Command and Control don't collide
+    /// keysym) for `activeModifierKeys` so that Command and Control don't collide
     /// when both map to the same remote keysym (Ctrl_L).
     private struct ModifierEntry {
         let flag: NSEvent.ModifierFlags
@@ -386,11 +384,8 @@ override func updateTrackingAreas() {
         }
         heldCharKeysyms.removeAll()
 
-        // Also release CapsLock if held
-        if activeModifiers.contains(0xFFE5) {
-            activeModifiers.remove(0xFFE5)
-            batch += GuacProtocolEncoder.key(keysym: 0xFFE5, pressed: false)
-        }
+        // Nothing to do for CapsLock: we never send its keysym, so there is no
+        // remote latch of ours to release. See flagsChanged().
 
         if !batch.isEmpty { tunnel?.send(batch) }
     }
@@ -495,19 +490,19 @@ override func updateTrackingAreas() {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        var batch = syncModifiers(from: event.modifierFlags)
+        let batch = syncModifiers(from: event.modifierFlags)
 
-        // CapsLock: send press when toggled on, release when toggled off.
-        // The remote side treats it as a held modifier (like Shift).
-        let capsNowOn = event.modifierFlags.contains(.capsLock)
-        let capsWasOn = activeModifiers.contains(0xFFE5)
-        if capsNowOn && !capsWasOn {
-            activeModifiers.insert(0xFFE5)
-            batch += GuacProtocolEncoder.key(keysym: 0xFFE5, pressed: true)
-        } else if !capsNowOn && capsWasOn {
-            activeModifiers.remove(0xFFE5)
-            batch += GuacProtocolEncoder.key(keysym: 0xFFE5, pressed: false)
-        }
+        // CapsLock is deliberately NOT forwarded to the remote.
+        //
+        // KeyboardLayout.string() already folds the CapsLock flag into the
+        // layout translation, so with CapsLock on, pressing `a` resolves to the
+        // keysym for `A` and that is what we send. If we *also* told the remote
+        // its CapsLock latch was on, the remote would apply capitalization a
+        // second time and cancel ours out — `A` would arrive as `a`.
+        //
+        // This is exactly the rule already applied to Shift below in sendKey():
+        // the resolved keysym carries the capitalization, so the modifier itself
+        // must not be forwarded. Forwarding it double-applies.
 
         if !batch.isEmpty { tunnel?.send(batch) }
     }
